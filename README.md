@@ -87,7 +87,7 @@ Tests robustness to operating-condition shift — the defining challenge across 
 
 All classifiers are well-calibrated on Track A (Brier < 0.03, ECE < 0.025). Track B calibration collapses under operating-condition shift — confirming PR-AUC degradation is not a threshold artefact.
 
-### Latency Benchmark — Batch size 1, 1 000 runs
+### Latency Benchmark — Batch size 1, 1000 runs
 
 | Model                              | P50     | P95     | P99     |
 |------------------------------------|---------|---------|---------|
@@ -315,12 +315,6 @@ Expected response:
 
 **Why SHAP for explainability?**  
 XGBoost's native `pred_contribs=True` computes exact Shapley values (same C++ TreeShap algorithm as the `shap` library) — no extra dependency, no sampling, deterministic results. At batch_size=1 the overhead is ~0.5 ms. The `/explain` endpoint returns top-N feature contributions in log-odds space, allowing operators to understand *why* a high-risk prediction was made (e.g. sensor_11 HPC static pressure drift) before issuing a maintenance order.
-
----
-
-## Excluded Scope
-Streaming/Kafka, Kubernetes, GPU training, Transformer variants.  
-Clean extension paths where applicable.
 
 ---
 
