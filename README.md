@@ -94,6 +94,7 @@ All classifiers are well-calibrated on Track A (Brier < 0.03, ECE < 0.025). Trac
 | Logistic regression (276 features) | 0.11 ms | 0.12 ms | 0.15 ms |
 | XGBoost deployment (24 features)   | 0.71 ms | 1.04 ms | 1.87 ms |
 
+
 Logistic dot-product is faster than XGBoost tree-traversal at batch size 1. At larger batch sizes XGBoost amortises the tree overhead and closes the gap.
 ---
 
