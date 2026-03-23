@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Data (raw and processed — keep schemas)
+data/raw/
+data/processed/
+*.parquet
+
+# Trained artifacts
+artifacts/
+
+# MLflow
+mlflow.db
+mlruns/
+mlflow-artifacts/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Logs
+*.log
+logs/
+
+# Reports (generated outputs — contain absolute local paths)
+reports/
+
+# pre-commit
+.pre-commit-config.yaml.lock
+
+# Temp / scratch files
+*.txt.bak
+all_comments.txt

@@ -1,0 +1,39 @@
+data:
+  raw_dir: "../CMAPSSData"
+  processed_dir: "data/processed"
+
+features:
+  window_sizes: [10, 20, 30]
+  lag_k: [1, 3, 5]
+  lstm_window: 30
+
+labels:
+  label_within_x: 30
+
+training:
+  train_engine_split: 0.8
+  random_seed: 42
+
+optuna:
+  trials: 50
+  timeout: null
+
+survival:
+  censoring_ratio: 0.3
+
+mlflow:
+  experiment_name: "pdm_cmapss"
+  # DB-backed backend store for Model Registry API (used in Docker Compose).
+  # Set MLFLOW_TRACKING_URI env var to override (e.g. sqlite:///mlflow.db for local dev).
+  tracking_uri: "postgresql://mlflow:mlflow@localhost:5432/mlflow"
+  local_tracking_uri: "sqlite:///mlflow.db"
+
+service:
+  model_path: "artifacts/best_model.json"
+  rul_model_path: "artifacts/rul_regressor.json"
+  # Fallback max RUL (cycles) used only when rul_regressor.json is absent.
+  # Derived from data: 99th-percentile engine lifetime across all four FD variants.
+  max_rul_cycles: 340
+  host: "0.0.0.0"
+  port: 8000
+  risk_threshold: 0.5
