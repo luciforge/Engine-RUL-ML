@@ -37,3 +37,22 @@ service:
   host: "0.0.0.0"
   port: 8000
   risk_threshold: 0.5
+
+calibration:
+  # Split-conformal miscoverage rate — 0.1 gives a 90% coverage interval.
+  conformal_alpha: 0.1
+  # Path to persisted conformal q_hat artifact (relative to project root).
+  conformal_artifact: "artifacts/conformal_qhat.json"
+  # Quantile XGBoost lower/upper bounds for RUL prediction intervals.
+  quantile_low: 0.1
+  quantile_high: 0.9
+  # Number of stochastic forward passes for MC-Dropout LSTM uncertainty.
+  mc_dropout_samples: 50
+
+policy:
+  # Economic costs used by CostPolicy to select optimal maintenance action.
+  # Units: EUR (or any consistent currency).
+  cost_replacement: 8000       # Scheduled component replacement
+  cost_unplanned_failure: 50000  # Unplanned downtime + emergency repair
+  cost_inspection: 400         # Targeted inspection visit
+  cost_false_alarm: 200        # Wasted inspection when unit is healthy

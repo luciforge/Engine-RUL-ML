@@ -113,3 +113,63 @@ def evaluate_c_index(
     surv_valid = surv_df[fit_cols + ["duration", "event"]].dropna()
 
     return float(cph.score(surv_valid, scoring_method="concordance_index"))
+
+
+def evaluate_c_index_ci(
+    cph: CoxPHFitter,
+    test: pd.DataFrame,
+    feature_cols: list[str],
+    n_bootstrap: int = 200,
+) -> dict[str, float]:
+    """Bootstrap confidence interval for the C-index on the test set.
+
+    Resamples engine-level survival rows (with replacement) `n_bootstrap` times
+    to produce a distribution of C-index values, then returns the point estimate
+    together with the 2.5th and 97.5th percentiles (95% CI).
+
+    Parameters
+    ----------
+    cph          : fitted CoxPHFitter
+    test         : per-cycle test DataFrame
+    feature_cols : list of sensor/feature column names
+    n_bootstrap  : number of bootstrap resamples (default 200)
+
+    Returns
+    -------
+    dict with keys ``c_index``, ``ci_low``, ``ci_high``
+    """
+    cfg = _cfg()
+    seed = cfg["training"]["random_seed"] + 1
+    rng = np.random.default_rng(seed)
+
+    surv_df = _build_survival_df(
+        test, feature_cols, cfg["survival"]["censoring_ratio"], rng
+    )
+    fit_cols = [c for c in cph.params_.index if c in surv_df.columns]
+    surv_valid = surv_df[fit_cols + ["duration", "event"]].dropna().reset_index(drop=True)
+
+    point_estimate = float(cph.score(surv_valid, scoring_method="concordance_index"))
+
+    boot_scores: list[float] = []
+    boot_rng = np.random.default_rng(seed + 100)
+    n = len(surv_valid)
+    for _ in range(n_bootstrap):
+        sample = surv_valid.iloc[boot_rng.integers(0, n, size=n)]
+        # Skip degenerate samples where all events are censored
+        if sample["event"].sum() < 2:
+            continue
+        try:
+            score = float(cph.score(sample, scoring_method="concordance_index"))
+            boot_scores.append(score)
+        except Exception:  # noqa: BLE001
+            continue
+
+    if len(boot_scores) < 10:
+        return {"c_index": point_estimate, "ci_low": float("nan"), "ci_high": float("nan")}
+
+    arr = np.array(boot_scores)
+    return {
+        "c_index": point_estimate,
+        "ci_low": float(np.percentile(arr, 2.5)),
+        "ci_high": float(np.percentile(arr, 97.5)),
+    }

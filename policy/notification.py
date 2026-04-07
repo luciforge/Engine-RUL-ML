@@ -12,11 +12,108 @@ Two layers:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _cost_cfg() -> dict:
+    with open(_PROJECT_ROOT / "config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    return cfg.get("policy", {})
+
+
+# ---------------------------------------------------------------------------
+# Cost-sensitive decision policy
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CostPolicy:
+    """Economic cost parameters for the Replace / Inspect / Continue decision.
+
+    All values in a consistent currency unit (e.g. EUR).
+
+    Attributes
+    ----------
+    cost_replacement      : cost of a scheduled component replacement
+    cost_unplanned_failure: cost of an unplanned failure (downtime + repair)
+    cost_inspection       : cost of a targeted inspection visit
+    cost_false_alarm      : wasted cost when unit is healthy but inspected
+    """
+
+    cost_replacement: float = 8000.0
+    cost_unplanned_failure: float = 50000.0
+    cost_inspection: float = 400.0
+    cost_false_alarm: float = 200.0
+
+    @classmethod
+    def from_config(cls) -> "CostPolicy":
+        """Load cost parameters from the project config.yaml policy section."""
+        cfg = _cost_cfg()
+        return cls(
+            cost_replacement=float(cfg.get("cost_replacement", 8000.0)),
+            cost_unplanned_failure=float(cfg.get("cost_unplanned_failure", 50000.0)),
+            cost_inspection=float(cfg.get("cost_inspection", 400.0)),
+            cost_false_alarm=float(cfg.get("cost_false_alarm", 200.0)),
+        )
+
+
+def expected_cost_action(
+    risk: float,
+    rul: float,
+    policy: CostPolicy,
+) -> dict:
+    """Compute expected cost for each maintenance action and return the optimal one.
+
+    Three possible actions:
+
+    * **replace** — schedule a replacement now.
+      Expected cost = cost_replacement (certain).
+
+    * **inspect** — perform a targeted inspection.
+      If failure imminent (risk >= 0.5), inspection leads to replacement anyway
+      (cost_replacement + cost_inspection).  Otherwise just cost_inspection.
+
+    * **continue** — take no action.
+      Expected cost = risk * cost_unplanned_failure  (probabilistic failure cost)
+                    + (1 - risk) * 0  (no cost if unit stays healthy).
+      When rul <= 0 this converges to cost_unplanned_failure.
+
+    Parameters
+    ----------
+    risk   : float in [0, 1] — predicted failure probability
+    rul    : float >= 0     — estimated remaining useful life (cycles)
+    policy : CostPolicy     — cost parameters
+
+    Returns
+    -------
+    dict with keys:
+        ``replace`` (float), ``inspect`` (float), ``continue`` (float),
+        ``action`` (str — optimal action name),
+        ``expected_cost`` (float — cost of the optimal action)
+    """
+    risk = float(np.clip(risk, 0.0, 1.0))
+    rul = max(0.0, float(rul))
+
+    c_replace = policy.cost_replacement
+    # Inspection: if unit needs replacement after inspect, add replacement cost
+    c_inspect = policy.cost_inspection + risk * policy.cost_replacement + (1.0 - risk) * policy.cost_false_alarm
+    c_continue = risk * policy.cost_unplanned_failure
+
+    costs = {"replace": c_replace, "inspect": c_inspect, "continue": c_continue}
+    optimal_action = min(costs, key=costs.__getitem__)
+
+    return {
+        **costs,
+        "action": optimal_action,
+        "expected_cost": costs[optimal_action],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +139,10 @@ class ServiceAlert:
         Calendar days to recommended service date.
     message : str
         Human-readable summary for client notification.
+    action : str
+        Optimal cost-policy action: "replace" | "inspect" | "continue".
+    expected_cost : float
+        Expected cost (EUR) of the recommended action.
     """
 
     unit_id: int
@@ -51,6 +152,8 @@ class ServiceAlert:
     recommended_service_date: str
     days_until_service: int
     message: str
+    action: str = field(default="")
+    expected_cost: float = field(default=0.0)
 
 
 def evaluate_alert(
@@ -60,6 +163,7 @@ def evaluate_alert(
     threshold: float = 0.5,
     cycles_per_day: float = 3.0,
     reference_date: date | None = None,
+    cost_policy: CostPolicy | None = None,
 ) -> ServiceAlert:
     """Convert model outputs into a structured service alert.
 
@@ -77,11 +181,14 @@ def evaluate_alert(
     estimated_rul_cycles : float
         Regressor output from /predict.
     threshold : float
-        Decision threshold for "high" urgency (matches API _THRESHOLD).
+        Decision threshold for "high" urgency (matches API risk_threshold config).
     cycles_per_day : float
         Assumed operational cycles per calendar day for date estimation.
     reference_date : date, optional
         Base date for service date calculation. Defaults to today.
+    cost_policy : CostPolicy, optional
+        If provided, computes the economically optimal action and expected cost.
+        Defaults to CostPolicy.from_config().
 
     Returns
     -------
@@ -89,6 +196,9 @@ def evaluate_alert(
     """
     if reference_date is None:
         reference_date = date.today()
+
+    if cost_policy is None:
+        cost_policy = CostPolicy.from_config()
 
     rul = max(0.0, float(estimated_rul_cycles))
     days = int(math.ceil(rul / max(cycles_per_day, 1e-9)))
@@ -119,6 +229,8 @@ def evaluate_alert(
         urgency = "ok"
         msg = f"Unit {unit_id}: operating normally. Next check in {days} days."
 
+    cost_result = expected_cost_action(risk_score, rul, cost_policy)
+
     return ServiceAlert(
         unit_id=unit_id,
         risk_score=round(float(risk_score), 4),
@@ -127,6 +239,8 @@ def evaluate_alert(
         recommended_service_date=service_date.isoformat(),
         days_until_service=days,
         message=msg,
+        action=cost_result["action"],
+        expected_cost=round(cost_result["expected_cost"], 2),
     )
 
 
@@ -135,6 +249,7 @@ def sweep_threshold(
     y_score: np.ndarray,
     rul: np.ndarray,
     thresholds: np.ndarray | None = None,
+    cost_policy: CostPolicy | None = None,
 ) -> pd.DataFrame:
     """Sweep prediction threshold and compute operational metrics at each point.
 
@@ -148,12 +263,17 @@ def sweep_threshold(
         True RUL at each prediction point (for lead-time computation).
     thresholds : np.ndarray, optional
         Threshold values to sweep. Defaults to np.linspace(0.1, 0.9, 17).
+    cost_policy : CostPolicy, optional
+        When provided, adds an ``expected_cost`` column computed as the
+        fleet-average expected cost at each threshold using
+        ``expected_cost_action()``.
 
     Returns
     -------
     pd.DataFrame with columns:
         threshold, alerts, missed_failures, prevented_failures,
-        false_service_calls, mean_lead_time_cycles, median_lead_time_cycles.
+        false_service_calls, mean_lead_time_cycles, median_lead_time_cycles
+        [, expected_cost  — only when cost_policy is given].
     """
     if thresholds is None:
         thresholds = np.linspace(0.1, 0.9, 17)
@@ -169,17 +289,28 @@ def sweep_threshold(
         mean_lead = float(lead_times.mean()) if len(lead_times) > 0 else 0.0
         median_lead = float(np.median(lead_times)) if len(lead_times) > 0 else 0.0
 
-        rows.append(
-            {
-                "threshold": round(float(t), 3),
-                "alerts": int(pred_pos.sum()),
-                "missed_failures": int(fn_mask.sum()),
-                "prevented_failures": int(tp_mask.sum()),
-                "false_service_calls": int(fp_mask.sum()),
-                "mean_lead_time_cycles": round(mean_lead, 2),
-                "median_lead_time_cycles": round(median_lead, 2),
-            }
-        )
+        row: dict = {
+            "threshold": round(float(t), 3),
+            "alerts": int(pred_pos.sum()),
+            "missed_failures": int(fn_mask.sum()),
+            "prevented_failures": int(tp_mask.sum()),
+            "false_service_calls": int(fp_mask.sum()),
+            "mean_lead_time_cycles": round(mean_lead, 2),
+            "median_lead_time_cycles": round(median_lead, 2),
+        }
+
+        if cost_policy is not None:
+            # Fleet-average expected cost: apply optimal action per unit at threshold t
+            unit_costs = [
+                expected_cost_action(score, r, cost_policy)["expected_cost"]
+                for score, r in zip(y_score, rul)
+            ]
+            # At this threshold, flagged units are treated as "replace/inspect",
+            # unflagged as "continue".  Use the per-unit optimal cost regardless
+            # of threshold so the sweep shows the minimum achievable cost floor.
+            row["expected_cost"] = round(float(np.mean(unit_costs)), 2)
+
+        rows.append(row)
 
     return pd.DataFrame(rows)
 

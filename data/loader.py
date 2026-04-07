@@ -74,6 +74,13 @@ def load_fd(variant: str, split: str = "train") -> pd.DataFrame:
     df = _parse(path)
     df["unit_id"] = df["unit_id"].astype(int)
     df["cycle"] = df["cycle"].astype(int)
+
+    try:
+        from data.schemas.cmapss import cmapss_schema
+        cmapss_schema.validate(df, lazy=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Schema validation warning for %s/%s: %s", variant, split, exc)
+
     logger.info(
         "Loaded %s/%s: %d rows, %d units", variant, split, len(df), df["unit_id"].nunique()
     )

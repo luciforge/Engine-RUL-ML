@@ -7,6 +7,7 @@ RandomForest uses sensible fixed hyperparameters.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +17,7 @@ import yaml
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import average_precision_score
 from sklearn.model_selection import train_test_split
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 
 from features.pipeline import get_feature_cols
 
@@ -122,3 +123,113 @@ def train_xgboost(
 
     model.fit(X, y)
     return model
+
+
+def calibrate_xgboost(
+    clf: XGBClassifier,
+    calib_df: pd.DataFrame,
+    feature_cols: list[str],
+    alpha: float | None = None,
+) -> dict:
+    """Compute a split-conformal nonconformity threshold for the classifier.
+
+    Uses the calibration set to find ``q_hat``: the (1-alpha) quantile of
+    nonconformity scores ``1 - p_true_class``.  At inference, a prediction
+    set is then:  ``risk >= threshold - q_hat``  (single-label binary case).
+
+    In practice the result is used to widen the point estimate into an
+    interval:  risk_lower = clip(risk - q_hat, 0, 1),
+               risk_upper = clip(risk + q_hat, 0, 1).
+
+    Parameters
+    ----------
+    clf          : fitted XGBClassifier
+    calib_df     : held-out calibration DataFrame (never seen during training)
+    feature_cols : feature column names used during training
+    alpha        : miscoverage rate (default from config: calibration.conformal_alpha)
+
+    Returns
+    -------
+    dict with keys ``alpha`` (float) and ``q_hat`` (float)
+    """
+    cfg = _cfg()
+    if alpha is None:
+        alpha = float(cfg.get("calibration", {}).get("conformal_alpha", 0.1))
+
+    X_cal, y_cal = _Xy(calib_df, feature_cols)
+    proba = clf.predict_proba(X_cal)  # shape (N, 2)
+    # Nonconformity score: 1 - probability assigned to the true class
+    scores = 1.0 - proba[np.arange(len(y_cal)), y_cal]
+
+    n = len(scores)
+    # Finite-sample corrected quantile level
+    level = np.ceil((n + 1) * (1.0 - alpha)) / n
+    level = float(np.clip(level, 0.0, 1.0))
+    q_hat = float(np.quantile(scores, level))
+
+    return {"alpha": alpha, "q_hat": q_hat}
+
+
+def save_conformal_artifact(q_hat_dict: dict, path: Path) -> Path:
+    """Persist the conformal calibration artifact as JSON."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(q_hat_dict, f, indent=2)
+    return path
+
+
+def load_conformal_artifact(path: Path) -> dict | None:
+    """Load a conformal calibration artifact.  Returns None if file absent."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def train_xgboost_quantile(
+    train: pd.DataFrame,
+    feature_cols: list[str],
+    quantiles: tuple[float, float] = (0.1, 0.9),
+) -> tuple[XGBRegressor, XGBRegressor]:
+    """Train lower and upper quantile XGBoost regressors for RUL intervals.
+
+    Uses ``objective="reg:quantileerror"`` (available in XGBoost >= 2.0).
+    The label column is ``rul`` which must be present in ``train``.
+
+    Parameters
+    ----------
+    train        : training DataFrame containing 'rul' and feature_cols
+    feature_cols : feature column names
+    quantiles    : (lower_q, upper_q) quantile pair, default (0.1, 0.9)
+
+    Returns
+    -------
+    (lower_regressor, upper_regressor) — both XGBRegressor instances
+    """
+    cfg = _cfg()
+    seed = cfg["training"]["random_seed"]
+    qlow, qhigh = quantiles
+
+    X = train[feature_cols].fillna(0.0).values.astype(np.float32)
+    y = train["rul"].values.astype(np.float32)
+
+    base_params = dict(
+        n_estimators=300,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        tree_method="hist",
+        random_state=seed,
+        objective="reg:quantileerror",
+    )
+
+    lower = XGBRegressor(**base_params, quantile_alpha=qlow)
+    upper = XGBRegressor(**base_params, quantile_alpha=qhigh)
+
+    lower.fit(X, y)
+    upper.fit(X, y)
+
+    return lower, upper
