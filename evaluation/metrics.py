@@ -101,4 +101,21 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, floa
     }
 
 
+def business_metrics(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    rul: np.ndarray,
+    thresholds: np.ndarray | None = None,
+) -> "pd.DataFrame":
+    """Threshold-sweep business metrics table (wrapper around policy.notification.sweep_threshold).
+
+    Returns a DataFrame with columns: threshold, alerts, missed_failures,
+    prevented_failures, false_service_calls, mean_lead_time_cycles,
+    median_lead_time_cycles.  Pass a cost_policy to also get expected_cost column.
+    """
+    import pandas as pd  # noqa: F401 — needed for return type at runtime
+    from policy.notification import sweep_threshold
+    return sweep_threshold(y_true, y_score, rul, thresholds)
+
+
 

@@ -52,6 +52,11 @@ class PredictResponse(BaseModel):
     risk_score: float = Field(..., ge=0.0, le=1.0, description="P(failure within X cycles)")
     replace_within_30: bool = Field(..., description="True when risk_score >= threshold")
     estimated_rul: float = Field(..., ge=0.0, description="Estimated remaining useful life (cycles)")
+    # Uncertainty interval fields — populated when conformal artifact is available
+    risk_lower: float | None = Field(None, ge=0.0, le=1.0, description="Conformal lower bound on risk score")
+    risk_upper: float | None = Field(None, ge=0.0, le=1.0, description="Conformal upper bound on risk score")
+    rul_lower: float | None = Field(None, ge=0.0, description="Lower quantile RUL estimate")
+    rul_upper: float | None = Field(None, ge=0.0, description="Upper quantile RUL estimate")
 
 
 class BatchScoreResponse(BaseModel):
@@ -92,4 +97,7 @@ class ScheduleResponse(BaseModel):
     urgency: str = Field(..., description="critical | high | scheduled | ok")
     recommended_service_date: str = Field(..., description="ISO-8601 date")
     days_until_service: int
+    message: str = ""
+    action: str = Field("", description="Optimal cost-policy action: replace | inspect | continue")
+    expected_cost: float = Field(0.0, description="Expected cost (EUR) of the recommended action")
     message: str

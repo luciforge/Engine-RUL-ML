@@ -1,7 +1,7 @@
 """PyTorch LSTM for binary failure classification on CMAPSS sliding windows.
 
 Architecture:
-    - Bidirectional 2-layer LSTM (hidden=64)
+    - Uni-directional 2-layer LSTM (hidden=64)
     - Cosine LR schedule
     - Early stopping on validation PR-AUC (patience=10)
     - SlidingWindowDataset: window=30 cycles per sample
@@ -9,6 +9,10 @@ Architecture:
 Training uses the last label in each window as the target.
 Inference returns per-row risk scores by sliding a window of length `window`
 over each engine's sorted cycle sequence.
+
+Extra:
+    predict_proba_mc() enables MC-Dropout uncertainty estimation by keeping
+    dropout active during inference and averaging N stochastic forward passes.
 """
 
 from __future__ import annotations
@@ -199,3 +203,56 @@ def predict_proba_lstm(
             logits = model(xb)
             scores.append(torch.softmax(logits, dim=1)[:, 1].numpy())
     return np.concatenate(scores)
+
+
+def predict_proba_mc(
+    model: LSTMModel,
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    window: int = 30,
+    batch_size: int = 512,
+    n_samples: int = 50,
+) -> tuple[np.ndarray, np.ndarray]:
+    """MC-Dropout uncertainty estimate for each windowed sample.
+
+    Keeps dropout active during inference by calling model.train() and
+    runs `n_samples` stochastic forward passes.  Returns the mean and
+    standard deviation of the positive-class probability across passes.
+
+    Parameters
+    ----------
+    model       : trained LSTMModel (dropout layers must be present)
+    df          : per-cycle DataFrame with feature_cols and 'unit_id' / 'cycle'
+    feature_cols: list of input feature names
+    window      : sliding-window length (must match training config)
+    batch_size  : DataLoader batch size
+    n_samples   : number of stochastic forward passes
+
+    Returns
+    -------
+    mean_proba : np.ndarray, shape (N,)  — mean risk score per window sample
+    std_proba  : np.ndarray, shape (N,)  — std of risk score across passes
+    """
+    ds = SlidingWindowDataset(df, feature_cols, window, label_col="label_within_x")
+    if len(ds) == 0:
+        empty = np.array([], dtype=np.float32)
+        return empty, empty
+
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+
+    # Keep dropout active: use train() mode but wrap in no_grad for speed
+    model.train()
+    all_passes: list[np.ndarray] = []
+    for _ in range(n_samples):
+        pass_scores: list[np.ndarray] = []
+        with torch.no_grad():
+            for xb, _ in loader:
+                logits = model(xb)
+                pass_scores.append(torch.softmax(logits, dim=1)[:, 1].numpy())
+        all_passes.append(np.concatenate(pass_scores))
+
+    # Return to eval mode to avoid side effects on further deterministic calls
+    model.eval()
+
+    stacked = np.stack(all_passes, axis=0)  # (n_samples, N)
+    return stacked.mean(axis=0), stacked.std(axis=0)

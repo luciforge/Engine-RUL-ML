@@ -53,8 +53,9 @@ coverage.xml
 *.log
 logs/
 
-# Reports (generated outputs — contain absolute local paths)
-reports/
+# Reports (generated outputs — exclude CSV/JSON but keep images)
+reports/*
+!reports/*.png
 
 # pre-commit
 .pre-commit-config.yaml.lock

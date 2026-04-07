@@ -25,6 +25,7 @@ def _parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--no-hpo", action="store_true", help="Skip Optuna HPO (faster dev runs)")
     p.add_argument("--no-lstm", action="store_true", help="Skip LSTM training")
+    p.add_argument("--no-tcn", action="store_true", help="Skip TCN training")
     p.add_argument(
         "--variants",
         nargs="+",
@@ -180,6 +181,45 @@ def main():
             except Exception as exc:
                 log.warning("LSTM failed for %s: %s", variant, exc)
 
+        if not args.no_tcn:
+            log.info("Training TCN…")
+            try:
+                from models.deep.tcn import train_tcn, predict_proba_tcn
+                import yaml as _yaml
+                with open(_PROJECT_ROOT / "config.yaml") as f:
+                    cfg = _yaml.safe_load(f)
+
+                unit_ids = ta.train["unit_id"].unique()
+                n_val = max(1, int(len(unit_ids) * 0.1))
+                val_ids = set(unit_ids[:n_val])
+                tcn_train = ta.train[~ta.train["unit_id"].isin(val_ids)]
+                tcn_val = ta.train[ta.train["unit_id"].isin(val_ids)]
+
+                tcn = train_tcn(tcn_train, tcn_val, ta.feature_cols)
+                window = cfg["features"]["lstm_window"]
+                ta_scores_tcn = predict_proba_tcn(tcn, ta.test, ta.feature_cols, window)
+                from models.deep.lstm import SlidingWindowDataset as _SWD
+                ds_tcn = _SWD(ta.test, ta.feature_cols, window)
+                ta_labels_tcn = np.array([ds_tcn[i][1].item() for i in range(len(ds_tcn))])
+
+                if len(ta_scores_tcn) > 0 and len(ta_labels_tcn) > 0:
+                    ta_m_tcn = classification_metrics(ta_labels_tcn, ta_scores_tcn)
+                    log_run(
+                        model_name=f"tcn_{variant}",
+                        params={"model": "tcn", "variant": variant, "window": window},
+                        metrics={f"track_a_{k}": v for k, v in ta_m_tcn.items()},
+                    )
+                    log.info(
+                        "TCN %s — PR-AUC=%.4f  F1=%.4f  Brier=%.4f  ECE=%.4f",
+                        variant,
+                        ta_m_tcn["pr_auc"],
+                        ta_m_tcn["f1"],
+                        ta_m_tcn["brier_score"],
+                        ta_m_tcn["ece"],
+                    )
+            except Exception as exc:
+                log.warning("TCN failed for %s: %s", variant, exc)
+
     # Deployment-track models use the raw 24 input features (3 operational settings +
     # 21 sensors) to support single-cycle inference without pre-computed rolling windows.
     log.info("Training deployment models on raw features…")
@@ -233,6 +273,47 @@ def main():
         "Deployment regressor — MAE=%.2f  RMSE=%.2f  Asymmetric=%.2f",
         reg_m["mae"], reg_m["rmse"], reg_m["asymmetric_penalty"],
     )
+
+    # ------------------------------------------------------------------
+    # Conformal calibration for the deployment classifier
+    # ------------------------------------------------------------------
+    log.info("Fitting conformal calibration on held-out raw test set…")
+    try:
+        from models.classical.rf_xgb import calibrate_xgboost, save_conformal_artifact
+        conformal = calibrate_xgboost(deploy_clf, raw_test, _raw_cols)
+        conformal_path = _PROJECT_ROOT / "artifacts" / "conformal_qhat.json"
+        save_conformal_artifact(conformal, conformal_path)
+        log.info(
+            "Conformal q_hat=%.4f (alpha=%.2f) saved to %s",
+            conformal["q_hat"], conformal["alpha"], conformal_path,
+        )
+    except Exception as exc:
+        log.warning("Conformal calibration failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Quantile XGBoost for RUL prediction intervals
+    # ------------------------------------------------------------------
+    log.info("Training quantile RUL regressors (q=0.1 and q=0.9)…")
+    try:
+        from models.classical.rf_xgb import train_xgboost_quantile
+        import yaml as _yaml
+        with open(_PROJECT_ROOT / "config.yaml") as f:
+            _qcfg = _yaml.safe_load(f)
+        cal_cfg = _qcfg.get("calibration", {})
+        qlow = float(cal_cfg.get("quantile_low", 0.1))
+        qhigh = float(cal_cfg.get("quantile_high", 0.9))
+
+        rul_lower, rul_upper = train_xgboost_quantile(
+            raw_train, _raw_cols, quantiles=(qlow, qhigh)
+        )
+        lower_path = _PROJECT_ROOT / "artifacts" / "rul_lower.json"
+        upper_path = _PROJECT_ROOT / "artifacts" / "rul_upper.json"
+        from service.onnx_export import export_xgboost
+        export_xgboost(rul_lower, _raw_cols, lower_path)
+        export_xgboost(rul_upper, _raw_cols, upper_path)
+        log.info("Quantile RUL models saved to %s and %s", lower_path, upper_path)
+    except Exception as exc:
+        log.warning("Quantile RUL training failed: %s", exc)
 
     log.info("Training complete. Run 'make evaluate' to print the comparison table.")
 
